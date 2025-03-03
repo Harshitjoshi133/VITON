@@ -1,0 +1,18 @@
+# List of commands to run as if you were starting from a fresh virtual environment
+commands = [
+    # For example:
+    "pip install -r requirements.txt",
+    "python main.py",
+]
+
+ignore = [
+    # List of files to ignore sending with your project
+    # For example:
+    ".git",
+    # ".DS_Store",
+]
+# The optimization priority for the job
+optimization_priority = "PRICE"  # Either "PRICE" or "TIME"
+
+# The GPU you'd like to use. Defaults to "auto", where TensorPool will selected the GPU based on the optimization priority
+gpu = "auto" # Either "auto", "T4", "L4", or "A100". Defaults to "auto". More GPUs coming soon!
