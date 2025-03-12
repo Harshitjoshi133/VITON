@@ -121,10 +121,12 @@ class LeffaModel(nn.Module):
 
         # Load pretrained model
         if pretrained_model != "" and pretrained_model is not None:
-            self.load_state_dict(torch.load(
-                pretrained_model, map_location="cpu"))
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            state_dict = torch.load(pretrained_model, map_location=device)
+            self.load_state_dict(state_dict)
+            self.to(device)
             logger.info(
-                "Load pretrained model from {}".format(pretrained_model))
+                f"Loaded pretrained model from {pretrained_model} to {device}")
 
     def replace_conv_in_layer(self, unet_model, new_in_channels):
         original_conv_in = unet_model.conv_in

@@ -145,7 +145,7 @@ class SCHP:
             "fushion.3.weight": "fushion.4.weight",
             "fushion.3.bias": "fushion.4.bias",
         }
-        state_dict = torch.load(ckpt_path, map_location="cpu")["state_dict"]
+        state_dict = torch.load(ckpt_path, map_location=self.device)["state_dict"]
         new_state_dict = OrderedDict()
         for k, v in state_dict.items():
             name = k[7:]  # remove `module.`
