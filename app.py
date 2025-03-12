@@ -10,48 +10,56 @@ from leffa_utils.utils import resize_and_center, list_dir, get_agnostic_mask_hd,
 from preprocess.humanparsing.run_parsing import Parsing
 from preprocess.openpose.run_openpose import OpenPose
 
-import gradio as gr
-
-# Download checkpoints
-#snapshot_download(repo_id="franciszzj/Leffa", local_dir="./ckpts")
-
 
 class LeffaPredictor(object):
     def __init__(self):
+        print("Loading checkpoints...")
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"Using device: {device}")
+        print("Loading mask predictor...")
         self.mask_predictor = AutoMasker(
             densepose_path="./ckpts/densepose",
             schp_path="./ckpts/schp",
+            device=device
         )
-
+        print("Loading densepose predictor...")
         self.densepose_predictor = DensePosePredictor(
             config_path="./ckpts/densepose/densepose_rcnn_R_50_FPN_s1x.yaml",
             weights_path="./ckpts/densepose/model_final_162be9.pkl",
         )
-
+        print("Loading parsing...")
         self.parsing = Parsing(
             atr_path="./ckpts/humanparsing/parsing_atr.onnx",
             lip_path="./ckpts/humanparsing/parsing_lip.onnx",
         )
-
+        print('Loading Parsing Completed')
+        print("Loading openpose...")
         self.openpose = OpenPose(
             body_model_path="./ckpts/openpose/body_pose_model.pth",
         )
-
+        print('Loading OpenPose Completed')
+        print("Loading virtual try-on model...")
         vt_model_hd = LeffaModel(
             pretrained_model_name_or_path="./ckpts/stable-diffusion-inpainting",
             pretrained_model="./ckpts/virtual_tryon.pth",
             dtype="float16",
         )
+        print('Loading Virtual Try-on HD Completed')
         self.vt_inference_hd = LeffaInference(model=vt_model_hd)
-
+        print('Loading Virtual Try-on DC Completed')
         vt_model_dc = LeffaModel(
             pretrained_model_name_or_path="./ckpts/stable-diffusion-inpainting",
             pretrained_model="./ckpts/virtual_tryon_dc.pth",
             dtype="float16",
         )
         self.vt_inference_dc = LeffaInference(model=vt_model_dc)
-
-       
+        print('Loading Virtual Try-on DC Completed')
+        pt_model = LeffaModel(
+            pretrained_model_name_or_path="./ckpts/stable-diffusion-xl-1.0-inpainting-0.1",
+            pretrained_model="./ckpts/pose_transfer.pth",
+            dtype="float16",
+        )
+        self.pt_inference = LeffaInference(model=pt_model)
 
     def leffa_predict(
         self,
@@ -90,6 +98,8 @@ class LeffaPredictor(object):
             # garment_type_hd = "upper" if vt_garment_type in [
             #     "upper_body", "dresses"] else "lower"
             # mask = self.mask_predictor(src_image, garment_type_hd)["mask"]
+        elif control_type == "pose_transfer":
+            mask = Image.fromarray(np.ones_like(src_image_array) * 255)
 
         # DensePose
         if control_type == "virtual_tryon":
@@ -106,7 +116,11 @@ class LeffaPredictor(object):
                     [src_image_seg_array] * 3, axis=-1)
                 src_image_seg = Image.fromarray(src_image_seg_array)
                 densepose = src_image_seg
-        
+        elif control_type == "pose_transfer":
+            src_image_iuv_array = self.densepose_predictor.predict_iuv(
+                src_image_array)[:, :, ::-1]
+            src_image_iuv = Image.fromarray(src_image_iuv_array)
+            densepose = src_image_iuv
 
         # Leffa
         transform = LeffaTransform()
@@ -123,6 +137,8 @@ class LeffaPredictor(object):
                 inference = self.vt_inference_hd
             elif vt_model_type == "dress_code":
                 inference = self.vt_inference_dc
+        elif control_type == "pose_transfer":
+            inference = self.pt_inference
         output = inference(
             data,
             ref_acceleration=ref_acceleration,
@@ -137,137 +153,11 @@ class LeffaPredictor(object):
     def leffa_predict_vt(self, src_image_path, ref_image_path, ref_acceleration, step, scale, seed, vt_model_type, vt_garment_type, vt_repaint):
         return self.leffa_predict(src_image_path, ref_image_path, "virtual_tryon", ref_acceleration, step, scale, seed, vt_model_type, vt_garment_type, vt_repaint)
 
-   
+    def leffa_predict_pt(self, src_image_path, ref_image_path, ref_acceleration, step, scale, seed):
+        return self.leffa_predict(src_image_path, ref_image_path, "pose_transfer", ref_acceleration, step, scale, seed)
 
 
 if __name__ == "__main__":
-
+    print('Starting')
     leffa_predictor = LeffaPredictor()
-    example_dir = "./ckpts/examples"
-    person1_images = list_dir(f"{example_dir}/person1")
-    person2_images = list_dir(f"{example_dir}/person2")
-    garment_images = list_dir(f"{example_dir}/garment")
-
-    title = "## Leffa: Learning Flow Fields in Attention for Controllable Person Image Generation"
-    link = """[📚 Paper](https://arxiv.org/abs/2412.08486) - [🤖 Code](https://github.com/franciszzj/Leffa) - [🔥 Demo](https://huggingface.co/spaces/franciszzj/Leffa) - [🤗 Model](https://huggingface.co/franciszzj/Leffa)
-           
-           Star ⭐ us if you like it!
-           """
-    news = """## News
-            - 09/Jan/2025. Inference defaults to float16, generating an image in 6 seconds (on A100).
-
-            More news can be found in the [GitHub repository](https://github.com/franciszzj/Leffa).
-            """
-    description = "Leffa is a unified framework for controllable person image generation that enables precise manipulation of both appearance (i.e., virtual try-on) and pose (i.e., pose transfer)."
-    note = "Note: The models used in the demo are trained solely on academic datasets. Virtual try-on uses VITON-HD/DressCode uses DeepFashion."
-
-    with gr.Blocks(theme=gr.themes.Default(primary_hue=gr.themes.colors.pink, secondary_hue=gr.themes.colors.red)).queue() as demo:
-        gr.Markdown(title)
-        gr.Markdown(link)
-        gr.Markdown(news)
-        gr.Markdown(description)
-
-        with gr.Tab("Control Appearance (Virtual Try-on)"):
-            with gr.Row():
-                with gr.Column():
-                    gr.Markdown("#### Person Image")
-                    vt_src_image = gr.Image(
-                        sources=["upload"],
-                        type="filepath",
-                        label="Person Image",
-                        width=512,
-                        height=512,
-                    )
-
-                    gr.Examples(
-                        inputs=vt_src_image,
-                        examples_per_page=10,
-                        examples=person1_images,
-                    )
-
-                with gr.Column():
-                    gr.Markdown("#### Garment Image")
-                    vt_ref_image = gr.Image(
-                        sources=["upload"],
-                        type="filepath",
-                        label="Garment Image",
-                        width=512,
-                        height=512,
-                    )
-
-                    gr.Examples(
-                        inputs=vt_ref_image,
-                        examples_per_page=10,
-                        examples=garment_images,
-                    )
-
-                with gr.Column():
-                    gr.Markdown("#### Generated Image")
-                    vt_gen_image = gr.Image(
-                        label="Generated Image",
-                        width=512,
-                        height=512,
-                    )
-
-                    with gr.Row():
-                        vt_gen_button = gr.Button("Generate")
-
-                    with gr.Accordion("Advanced Options", open=False):
-                        vt_model_type = gr.Radio(
-                            label="Model Type",
-                            choices=[("VITON-HD (Recommended)", "viton_hd"),
-                                     ("DressCode (Experimental)", "dress_code")],
-                            value="viton_hd",
-                        )
-
-                        vt_garment_type = gr.Radio(
-                            label="Garment Type",
-                            choices=[("Upper", "upper_body"),
-                                     ("Lower", "lower_body"),
-                                     ("Dress", "dresses")],
-                            value="upper_body",
-                        )
-
-                        vt_ref_acceleration = gr.Radio(
-                            label="Accelerate Reference UNet (may slightly reduce performance)",
-                            choices=[("True", True), ("False", False)],
-                            value=False,
-                        )
-
-                        vt_repaint = gr.Radio(
-                            label="Repaint Mode",
-                            choices=[("True", True), ("False", False)],
-                            value=False,
-                        )
-
-                        vt_step = gr.Number(
-                            label="Inference Steps", minimum=30, maximum=100, step=1, value=30)
-
-                        vt_scale = gr.Number(
-                            label="Guidance Scale", minimum=0.1, maximum=5.0, step=0.1, value=2.5)
-
-                        vt_seed = gr.Number(
-                            label="Random Seed", minimum=-1, maximum=2147483647, step=1, value=42)
-
-                    with gr.Accordion("Debug", open=False):
-                        vt_mask = gr.Image(
-                            label="Generated Mask",
-                            width=256,
-                            height=256,
-                        )
-
-                        vt_densepose = gr.Image(
-                            label="Generated DensePose",
-                            width=256,
-                            height=256,
-                        )
-
-                vt_gen_button.click(fn=leffa_predictor.leffa_predict_vt, inputs=[
-                    vt_src_image, vt_ref_image, vt_ref_acceleration, vt_step, vt_scale, vt_seed, vt_model_type, vt_garment_type, vt_repaint], outputs=[vt_gen_image, vt_mask, vt_densepose])
-
-        
-
-        gr.Markdown(note)
-
-        demo.launch(share=True, server_port=7860,
-                    allowed_paths=["./ckpts/examples"])
+    print('Starting Completed')
