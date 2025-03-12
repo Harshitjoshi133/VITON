@@ -1,3 +1,4 @@
+import torch
 import numpy as np
 from PIL import Image
 from huggingface_hub import snapshot_download
