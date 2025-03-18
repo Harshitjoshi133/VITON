@@ -1,69 +1,120 @@
-from fastapi import FastAPI, File, UploadFile, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi.responses import FileResponse
+import numpy as np
 from PIL import Image
-import io
 import torch
-from fastapi.responses import Response
-from preprocess.humanparsing.run_parsing import Parsing
-from preprocess.openpose.run_openpose import OpenPose
-from leffa_utils.garment_agnostic_mask_predictor import AutoMasker
-from leffa_utils.utils import get_agnostic_mask_hd
-from leffa_utils.densepose_predictor import DensePosePredictor
+from leffa.model import LeffaModel
+from leffa.inference import LeffaInference
+from utils.garment_agnostic_mask_predictor import AutoMasker
+from utils.densepose_predictor import DensePosePredictor
+import io
+import os
+from contextlib import contextmanager
+import gc
 import nest_asyncio
 from pyngrok import ngrok
 import uvicorn
 
-class MaskingService:
+app = FastAPI(title="VITON API", description="Virtual Try-On API using Leffa")
+
+# Memory management context manager
+@contextmanager
+def torch_gc():
+    try:
+        yield
+    finally:
+        gc.collect()
+        if torch.cuda.is_available() and torch.cuda.current_device() >= 0:
+            with torch.cuda.device('cuda'):
+                torch.cuda.empty_cache()
+
+def clear_memory():
+    gc.collect()
+
+class ModelManager:
     def __init__(self):
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        print(f"Using device: {device}")
-        
+        self.mask_predictor = None
+        self.densepose_predictor = None
+        self.vt_model = None
+        self.vt_inference = None
+        self.initialize_models()
+
+    def initialize_models(self):
+        # Initialize mask predictor
         self.mask_predictor = AutoMasker(
             densepose_path="./ckpts/densepose",
             schp_path="./ckpts/schp",
-            device=device
         )
 
+        # Initialize densepose predictor
         self.densepose_predictor = DensePosePredictor(
             config_path="./ckpts/densepose/densepose_rcnn_R_50_FPN_s1x.yaml",
             weights_path="./ckpts/densepose/model_final_162be9.pkl",
         )
-        self.parsing = Parsing(
-            atr_path="./ckpts/humanparsing/parsing_atr.onnx",
-            lip_path="./ckpts/humanparsing/parsing_lip.onnx"
-        )
-        self.openpose = OpenPose(
-            body_model_path="./ckpts/openpose/body_pose_model.pth"
-        )
 
-    def get_mask(self, image: Image.Image, garment_type: str = "upper_body") -> Image.Image:
-        image = image.convert("RGB")
-        model_parse, _ = self.parsing(image.resize((384, 512)))
-        keypoints = self.openpose(image.resize((384, 512)))
-        mask = get_agnostic_mask_hd(model_parse, keypoints, garment_type)
-        return mask.resize((768, 1024))
+        # Initialize VITON model
+        with torch_gc():
+            model = LeffaModel(
+                pretrained_model_name_or_path="./ckpts/stable-diffusion-inpainting",
+                pretrained_model="./ckpts/virtual_tryon.pth"
+            )
+            model = model.half()
+            self.vt_model = model.to("cuda")
+            self.vt_inference = LeffaInference(model=model)
 
-app = FastAPI(title="Virtual Try-On Masking API")
+model_manager = ModelManager()
 
-@app.post("/generate_mask")
-async def generate_mask(file: UploadFile = File(...), garment_type: str = "upper_body"):
-    if garment_type not in ["upper_body", "lower_body", "dresses"]:
-        raise HTTPException(status_code=400, detail="Invalid garment type")
-    
+@app.post("/try-on/")
+async def virtual_try_on(
+    person_image: UploadFile = File(...),
+    garment_image: UploadFile = File(...)
+):
     try:
-        content = await file.read()
-        image = Image.open(io.BytesIO(content))
-        if not hasattr(app, "masking_service"):
-            app.masking_service = MaskingService()
-        mask = app.masking_service.get_mask(image, garment_type)
-        img_byte_arr = io.BytesIO()
-        mask.save(img_byte_arr, format='PNG')
-        return Response(content=img_byte_arr.getvalue(), media_type="image/png")
+        # Convert uploaded files to PIL Images
+        person_img = Image.open(io.BytesIO(await person_image.read()))
+        garment_img = Image.open(io.BytesIO(await garment_image.read()))
+
+        # Convert to RGB if needed
+        if person_img.mode != 'RGB':
+            person_img = person_img.convert('RGB')
+        if garment_img.mode != 'RGB':
+            garment_img = garment_img.convert('RGB')
+
+        # Process images for VITON
+        with torch_gc():
+            # Get mask and parse
+            mask_output = model_manager.mask_predictor(person_img)
+            agnostic = mask_output["agnostic"]
+            parse = mask_output["parse"]
+            
+            # Get dense pose
+            dense_output = model_manager.densepose_predictor(person_img)
+            dense = dense_output["dense"]
+
+            # Perform virtual try-on
+            output = model_manager.vt_inference.infer(
+                source_image=person_img,
+                target_image=garment_img,
+                agnostic=agnostic,
+                parse=parse,
+                dense=dense
+            )
+
+            # Save the result temporarily
+            output_path = "temp_output.png"
+            output.save(output_path)
+
+            # Return the result
+            return FileResponse(output_path, media_type="image/png", filename="try_on_result.png")
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-@app.on_event("startup")
-async def startup_event():
-    app.masking_service = MaskingService()
+    finally:
+        # Clean up
+        clear_memory()
+        if os.path.exists("temp_output.png"):
+            os.remove("temp_output.png")
 
 def start_ngrok():
     port = 8000
